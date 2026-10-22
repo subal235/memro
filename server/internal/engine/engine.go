@@ -59,9 +59,10 @@ func (e *Engine) queryEmbedding(ctx context.Context, q string) []float32 {
 
 // --- Search -----------------------------------------------------------------
 
-// Search runs hybrid semantic + keyword search over an agent's memories from
-// the last 90 days. Semantic and keyword candidates are combined with
-// Reciprocal Rank Fusion (fuseRRF).
+// Search runs hybrid semantic + keyword search over an agent's memories.
+// Semantic and keyword candidates are combined with Reciprocal Rank Fusion
+// (fuseRRF). Search has no implicit age cutoff; callers can use explicit date
+// filters in TemporalSearch when a bounded time window is desired.
 func (e *Engine) Search(ctx context.Context, q domain.SearchQuery, tenantID uuid.UUID) (*domain.SearchResponse, error) {
 	start := e.now()
 	mode := q.Mode
@@ -237,7 +238,6 @@ func (e *Engine) semanticIDs(ctx context.Context, q domain.SearchQuery, tenantID
 	args := []any{q.AgentID, tenantID, pgvector.NewVector(vec), len(vec), limit}
 	sql := `SELECT m.id FROM memory_embeddings e JOIN memories m ON m.id = e.memory_id
 		WHERE m.agent_id = $1 AND m.tenant_id = $2 AND e.dims = $4
-		  AND m.created_at > NOW() - INTERVAL '90 days'
 		  AND (m.metadata->>'action' IS NULL OR m.metadata->>'action' NOT IN ('claim', 'release', 'intent', 'handoff'))` + typeFilter(q, &args) + `
 		ORDER BY e.embedding <=> $3 LIMIT $5`
 	rows, err := e.pool.Query(ctx, sql, args...)
@@ -270,7 +270,6 @@ func (e *Engine) keywordHits(ctx context.Context, q domain.SearchQuery, tenantID
 	sql := `SELECT m.id, ts_rank_cd(to_tsvector('english', m.content), ` + tsq + `) AS rank
 		FROM memories m
 		WHERE m.agent_id = $1 AND m.tenant_id = $2
-		  AND m.created_at > NOW() - INTERVAL '90 days'
 		  AND (m.metadata->>'action' IS NULL OR m.metadata->>'action' NOT IN ('claim', 'release', 'intent', 'handoff'))
 		  AND to_tsvector('english', m.content) @@ ` + tsq + typeFilter(q, &args) + `
 		ORDER BY rank DESC LIMIT $4`
