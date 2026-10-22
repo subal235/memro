@@ -74,6 +74,9 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 	for _, opt := range opts {
 		opt(&o)
 	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
 	if cfg.DatabaseURL == "" {
 		return errors.New("DATABASE_URL must be set")
 	}
@@ -123,6 +126,7 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 
 	go ix.Run(ctx)
 	go indexer.RunGraphMaintenance(ctx, st)
+	go store.RunCoordinationPurge(ctx, st)
 	go conns.Run(ctx)
 
 	srv := api.NewServer(api.Deps{

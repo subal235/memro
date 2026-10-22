@@ -59,9 +59,10 @@ func (e *Engine) queryEmbedding(ctx context.Context, q string) []float32 {
 
 // --- Search -----------------------------------------------------------------
 
-// Search runs hybrid semantic + keyword search over an agent's memories from
-// the last 90 days. Semantic and keyword candidates are combined with
-// Reciprocal Rank Fusion (fuseRRF).
+// Search runs hybrid semantic + keyword search over an agent's memories.
+// Semantic and keyword candidates are combined with Reciprocal Rank Fusion
+// (fuseRRF). Search has no implicit age cutoff; callers can use explicit date
+// filters in TemporalSearch when a bounded time window is desired.
 func (e *Engine) Search(ctx context.Context, q domain.SearchQuery, tenantID uuid.UUID) (*domain.SearchResponse, error) {
 	start := e.now()
 	mode := q.Mode
@@ -237,7 +238,7 @@ func (e *Engine) semanticIDs(ctx context.Context, q domain.SearchQuery, tenantID
 	args := []any{q.AgentID, tenantID, pgvector.NewVector(vec), len(vec), limit}
 	sql := `SELECT m.id FROM memory_embeddings e JOIN memories m ON m.id = e.memory_id
 		WHERE m.agent_id = $1 AND m.tenant_id = $2 AND e.dims = $4
-		  AND m.created_at > NOW() - INTERVAL '90 days'` + typeFilter(q, &args) + `
+		  AND (m.metadata->>'action' IS NULL OR m.metadata->>'action' NOT IN ('claim', 'release', 'intent', 'handoff'))` + typeFilter(q, &args) + `
 		ORDER BY e.embedding <=> $3 LIMIT $5`
 	rows, err := e.pool.Query(ctx, sql, args...)
 	if err != nil {
@@ -269,7 +270,7 @@ func (e *Engine) keywordHits(ctx context.Context, q domain.SearchQuery, tenantID
 	sql := `SELECT m.id, ts_rank_cd(to_tsvector('english', m.content), ` + tsq + `) AS rank
 		FROM memories m
 		WHERE m.agent_id = $1 AND m.tenant_id = $2
-		  AND m.created_at > NOW() - INTERVAL '90 days'
+		  AND (m.metadata->>'action' IS NULL OR m.metadata->>'action' NOT IN ('claim', 'release', 'intent', 'handoff'))
 		  AND to_tsvector('english', m.content) @@ ` + tsq + typeFilter(q, &args) + `
 		ORDER BY rank DESC LIMIT $4`
 	rows, err := e.pool.Query(ctx, sql, args...)
@@ -355,7 +356,7 @@ type TemporalItem struct {
 // score = similarity*(1-w) + recency*w, where recency = 1/(1 + age_days/30).
 func (e *Engine) TemporalSearch(ctx context.Context, q TemporalQuery, tenantID uuid.UUID) ([]TemporalItem, error) {
 	args := []any{q.AgentID, tenantID}
-	where := `m.agent_id = $1 AND m.tenant_id = $2`
+	where := `m.agent_id = $1 AND m.tenant_id = $2 AND (m.metadata->>'action' IS NULL OR m.metadata->>'action' NOT IN ('claim', 'release', 'intent', 'handoff'))`
 	add := func(cond string, v any) {
 		args = append(args, v)
 		where += fmt.Sprintf(" AND "+cond, len(args))
@@ -699,7 +700,7 @@ func (e *Engine) Timeline(ctx context.Context, agentID string, tenantID uuid.UUI
 		return nil, ErrNotFound
 	}
 	rows, err := e.pool.Query(ctx, `SELECT created_at, action, COALESCE(resource_id, '') FROM audit_log
-		WHERE resource_id = $1 AND tenant_id = $2 ORDER BY created_at ASC`, memoryID.String(), tenantID)
+		WHERE resource_id = $1 AND tenant_id = $2 AND agent_id = $3 ORDER BY created_at ASC`, memoryID.String(), tenantID, agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -744,8 +745,8 @@ func (e *Engine) MemoryChain(ctx context.Context, agentID string, tenantID uuid.
 	rows, err := e.pool.Query(ctx, `SELECT m.id::TEXT, m.content, r.relation_type, COALESCE(r.confidence, 1.0)::REAL
 		FROM memory_relations r
 		JOIN memories m ON m.id = CASE WHEN r.source_memory_id = $1 THEN r.target_memory_id ELSE r.source_memory_id END
-		WHERE (r.source_memory_id = $1 OR r.target_memory_id = $1) AND r.tenant_id = $2
-		ORDER BY r.created_at`, id, tenantID)
+		WHERE (r.source_memory_id = $1 OR r.target_memory_id = $1) AND r.tenant_id = $2 AND m.agent_id = $3
+		ORDER BY r.created_at`, id, tenantID, agentID)
 	if err != nil {
 		return nil, err
 	}

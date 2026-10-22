@@ -311,6 +311,7 @@ func (s *Store) RevokeAPIKey(ctx context.Context, id uuid.UUID, agentID string) 
 type DeviceCode struct {
 	UserCode   string
 	ClientName string
+	CreatedAt  time.Time
 	ExpiresAt  time.Time
 	ApprovedAt *time.Time
 	ConsumedAt *time.Time
@@ -330,9 +331,9 @@ func (s *Store) CreateDeviceCode(ctx context.Context, deviceHash, userCode, clie
 
 func (s *Store) DeviceCodeByUserCode(ctx context.Context, userCode string) (*DeviceCode, error) {
 	var d DeviceCode
-	err := s.Pool.QueryRow(ctx, `SELECT user_code, client_name, expires_at, approved_at, consumed_at, agent_id, tenant_id
+	err := s.Pool.QueryRow(ctx, `SELECT user_code, client_name, created_at, expires_at, approved_at, consumed_at, agent_id, tenant_id
 		FROM device_codes WHERE user_code = $1`, userCode).
-		Scan(&d.UserCode, &d.ClientName, &d.ExpiresAt, &d.ApprovedAt, &d.ConsumedAt, &d.AgentID, &d.TenantID)
+		Scan(&d.UserCode, &d.ClientName, &d.CreatedAt, &d.ExpiresAt, &d.ApprovedAt, &d.ConsumedAt, &d.AgentID, &d.TenantID)
 	return nilIfNoRows(&d, err)
 }
 
@@ -571,6 +572,14 @@ func (s *Store) GetFile(ctx context.Context, id uuid.UUID) (*File, error) {
 	var f File
 	err := s.Pool.QueryRow(ctx, `SELECT id, agent_id, tenant_id, file_name, file_type, file_path, file_size, mime_type, extracted_text
 		FROM files WHERE id = $1`, id).
+		Scan(&f.ID, &f.AgentID, &f.TenantID, &f.FileName, &f.FileType, &f.FilePath, &f.FileSize, &f.MimeType, &f.ExtractedText)
+	return nilIfNoRows(&f, err)
+}
+
+func (s *Store) GetFileForAgent(ctx context.Context, id uuid.UUID, agentID string, tenantID uuid.UUID) (*File, error) {
+	var f File
+	err := s.Pool.QueryRow(ctx, `SELECT id, agent_id, tenant_id, file_name, file_type, file_path, file_size, mime_type, extracted_text
+		FROM files WHERE id = $1 AND agent_id = $2 AND tenant_id = $3`, id, agentID, tenantID).
 		Scan(&f.ID, &f.AgentID, &f.TenantID, &f.FileName, &f.FileType, &f.FilePath, &f.FileSize, &f.MimeType, &f.ExtractedText)
 	return nilIfNoRows(&f, err)
 }

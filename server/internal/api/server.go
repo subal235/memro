@@ -4,6 +4,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,6 +54,10 @@ type Server struct {
 	otpLimiter      *RateLimiter // sign-in codes requested per email
 	identityLimiter *RateLimiter // agents registered per client address
 	meeLimiters     map[string]*RateLimiter
+	promHandler     http.Handler
+
+	v1LogMu  sync.Mutex
+	v1Logged map[string]time.Time
 }
 
 type Deps struct {
@@ -81,6 +87,9 @@ func StoreUsageMeter(st *store.Store) extension.UsageMeter {
 }
 
 func NewServer(d Deps) *Server {
+	if err := d.Config.Validate(); err != nil {
+		panic(err) // misconfiguration; app.Run validates this before building the server
+	}
 	usage, quota := d.Usage, d.Quota
 	if usage == nil {
 		usage = StoreUsageMeter(d.Store)
@@ -97,7 +106,7 @@ func NewServer(d Deps) *Server {
 			panic(err) // misconfiguration; app.Run validates this before building the server
 		}
 	}
-	return &Server{
+	s := &Server{
 		connectors: conns,
 		cfg:        d.Config, store: d.Store, engine: d.Engine, embed: d.Embed, indexer: d.Indexer,
 		files: d.Files, email: d.Email, replay: auth.NewReplayCache(),
@@ -112,7 +121,12 @@ func NewServer(d Deps) *Server {
 			"/mee/evolve":  NewRateLimiter(5, time.Minute),
 			"/mee/resolve": NewRateLimiter(10, time.Minute),
 		},
+		promHandler: promhttp.Handler(),
 	}
+	if d.Config.MetricsToken == "" {
+		slog.Warn("METRICS_TOKEN is not set; /metrics is open without authentication")
+	}
+	return s
 }
 
 // Handler returns the full HTTP handler with middleware applied.
@@ -122,8 +136,8 @@ func (s *Server) Handler() http.Handler {
 	protected := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, s.requireAgent(h)) }
 
 	public("GET /health", s.health)
-	public("GET /metrics", promhttp.Handler().ServeHTTP)
-	public("GET /stats/cache", s.cacheStats)
+	public("GET /metrics", s.requireMetricsToken(s.metrics))
+	public("GET /stats/cache", s.requireMetricsToken(s.cacheStats))
 	public("POST /identity", s.createIdentity)
 	public("GET /identity/pow", s.identityPow)
 	public("GET /identity/{id}", s.getIdentity)
@@ -184,6 +198,13 @@ func (s *Server) Handler() http.Handler {
 	protected("PUT /connectors/{id}/sources", s.updateConnectorSources)
 	protected("POST /connectors/{id}/sync", s.syncConnector)
 	protected("DELETE /connectors/{id}", s.deleteConnector)
+	protected("POST /coordination/claim", s.coordinationClaim)
+	protected("POST /coordination/heartbeat", s.coordinationHeartbeat)
+	protected("POST /coordination/release", s.coordinationRelease)
+	protected("POST /coordination/handoff", s.coordinationHandoff)
+	protected("POST /coordination/check", s.coordinationCheck)
+	protected("GET /coordination/active", s.coordinationActive)
+	protected("POST /coordination/intent", s.coordinationIntent)
 
 	for pattern, h := range s.extra {
 		mux.Handle(pattern, h)
@@ -312,6 +333,14 @@ func (s *Server) authenticate(r *http.Request) (Agent, []byte, int, string) {
 	if sig == "" {
 		return Agent{}, nil, http.StatusUnauthorized, "Missing X-Signature header"
 	}
+	if len(sig) != 128 {
+		return Agent{}, nil, http.StatusUnauthorized, "Invalid signature"
+	}
+	sigBytes, err := hex.DecodeString(sig)
+	if err != nil {
+		return Agent{}, nil, http.StatusUnauthorized, "Invalid signature"
+	}
+	canonicalSig := hex.EncodeToString(sigBytes)
 	if ts == "" {
 		return Agent{}, nil, http.StatusUnauthorized, "Missing X-Timestamp header"
 	}
@@ -352,24 +381,49 @@ func (s *Server) authenticate(r *http.Request) (Agent, []byte, int, string) {
 	switch r.Header.Get("X-Signature-Version") {
 	case "2":
 		payload := auth.PayloadV2(ts, r.Method, r.URL.RequestURI(), raw)
-		if auth.Verify(pub, payload, sig) != nil {
+		if auth.VerifyBytes(pub, payload, sigBytes) != nil {
 			return Agent{}, nil, http.StatusUnauthorized, "Invalid signature"
 		}
-		if !s.replay.Use(sig, time.Now()) {
+		if !s.replay.Use(canonicalSig, time.Now()) {
 			return Agent{}, nil, http.StatusUnauthorized, "Request already used"
 		}
 	case "", "1":
 		if !s.cfg.AllowLegacySignatures {
 			return Agent{}, nil, http.StatusUnauthorized, "Legacy signatures are disabled; send X-Signature-Version: 2"
 		}
-		if auth.Verify(pub, auth.PayloadV1(ts, raw), sig) != nil {
+		if auth.VerifyBytes(pub, auth.PayloadV1(ts, raw), sigBytes) != nil {
 			return Agent{}, nil, http.StatusUnauthorized, "Invalid signature"
 		}
+		if !s.replay.Use(sig, time.Now()) {
+			return Agent{}, nil, http.StatusUnauthorized, "Request already used"
+		}
+		metrics.LegacySignatureRequests.Inc()
+		s.logLegacyV1(agentID)
 	default:
 		return Agent{}, nil, http.StatusUnauthorized, "Unsupported X-Signature-Version"
 	}
 	return Agent{ID: identity.ID, UserID: identity.UserID, TenantID: identity.TenantID, Via: "signature",
 		SigningKey: keyHex, KeyRole: role}, raw, 0, ""
+}
+
+func (s *Server) logLegacyV1(agentID string) {
+	s.v1LogMu.Lock()
+	defer s.v1LogMu.Unlock()
+	if s.v1Logged == nil {
+		s.v1Logged = make(map[string]time.Time)
+	}
+	now := time.Now()
+	if last, ok := s.v1Logged[agentID]; !ok || now.Sub(last) >= time.Hour {
+		s.v1Logged[agentID] = now
+		slog.Info("accepted request with legacy v1 signature", "agent_id", agentID)
+	}
+	if len(s.v1Logged) > 10_000 {
+		for k, exp := range s.v1Logged {
+			if now.Sub(exp) >= 2*time.Hour {
+				delete(s.v1Logged, k)
+			}
+		}
+	}
 }
 
 // signedWebhooks are authenticated by the sender's HMAC signature and
@@ -387,7 +441,8 @@ var signedWebhooks = map[string]bool{
 
 func (s *Server) rateLimitIP(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health" && r.URL.Path != "/metrics" && !signedWebhooks[r.URL.Path] && !s.ipLimiter.Allow(s.clientIP(r)) {
+		metricsExempt := (r.URL.Path == "/metrics" || r.URL.Path == "/stats/cache") && s.validMetricsToken(r)
+		if r.URL.Path != "/health" && !metricsExempt && !signedWebhooks[r.URL.Path] && s.ipLimiter != nil && !s.ipLimiter.Allow(s.clientIP(r)) {
 			metrics.RateLimitHits.Inc()
 			httpError(w, http.StatusTooManyRequests, "Rate limit exceeded")
 			return
@@ -459,7 +514,7 @@ func observe(next http.Handler) http.Handler {
 		if sw.status >= 400 {
 			metrics.HTTPErrors.WithLabelValues(code).Inc()
 		}
-		if r.URL.Path != "/health" && r.URL.Path != "/metrics" {
+		if r.URL.Path != "/health" && r.URL.Path != "/metrics" && r.URL.Path != "/stats/cache" {
 			slog.Info("request", "method", r.Method, "path", r.URL.Path, "status", sw.status, "ms", time.Since(start).Milliseconds())
 		}
 	})
@@ -543,6 +598,34 @@ func (l *RateLimiter) Allow(key string) bool {
 	}
 	w.count++
 	return true
+}
+
+func (s *Server) validMetricsToken(r *http.Request) bool {
+	if s.cfg.MetricsToken == "" {
+		return true
+	}
+	authHeader := r.Header.Get("Authorization")
+	expected := "Bearer " + s.cfg.MetricsToken
+	return subtle.ConstantTimeCompare([]byte(authHeader), []byte(expected)) == 1
+}
+
+func (s *Server) requireMetricsToken(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.validMetricsToken(r) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="metrics"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
+	h := s.promHandler
+	if h == nil {
+		h = promhttp.Handler()
+	}
+	h.ServeHTTP(w, r)
 }
 
 // --- Responses ------------------------------------------------------------------

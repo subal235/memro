@@ -1,322 +1,215 @@
-# Memro: Source-Available Agent Memory Infrastructure
+# Memro — Verified Memory Infrastructure for AI Agents
 
-**Memro gives AI agents persistent memory that evolves and reasons over time.**
-
-The cognitive runtime and agent memory layer providing autonomous AI agents with continuity of self, reasoning graphs, and verifiable context. Free for non-commercial use; commercial use through Memro Cloud.
+Give your AI agents persistent memory across sessions: agent identity, memory storage and hybrid retrieval through an API, SDKs and MCP.
 
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 [![CI](https://github.com/memrohq/memro/actions/workflows/ci.yml/badge.svg)](https://github.com/memrohq/memro/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
 [![MCP Ready](https://img.shields.io/badge/MCP-ready-purple.svg)](mcp)
-[![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
+> **License (Source Available)**
+> 
+> Memro is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+> - **Free for Non-Commercial Use**: Personal study, experiments, hobby projects, research, and testing without commercial application.
+> - **Commercial Use**: Using Memro for commercial products or production services requires a managed subscription on [Memro Cloud](https://memro.co) or an enterprise commercial license.
+> - **How to Get a Commercial License**: Visit [memro.co/pricing](https://memro.co/pricing) or contact `licensing@memro.co`.
+
+> **Repository Notice**: `github.com/memrohq/memro` is the single public repository for Memro. It contains the Go server, official SDKs (Python, JavaScript/TypeScript, Go), Model Context Protocol (MCP) server, and the CLI.
 
 ---
 
-## What is memro.co?
+## Quickstart
 
-memro.co is the **cognitive runtime for persistent AI agents**. It provides:
-
-1. **Persistent Memory** - Episodic, semantic, and profile memory that evolves over time.
-2. **Reasoning Graph** - Multi-hop causal reasoning over your agent's entire history.
-3. **Automatic Evolution** - Intelligent consolidation of narrative logs into factual cores.
-
-### Why memro.co?
-
-**AI agents are stateless.** Every conversation starts from zero. They can't remember who they are, what they've learned, or what they've done.
-
-**memro.co gives agents persistent memory they own.**
-
----
-
-## Quick Start (5 minutes)
-
-### Prerequisites
-- Docker & Docker Compose
-- 2GB RAM minimum
-- Ports 8081 and 5432 available
-
-### Installation
+### Option A: Memro Cloud with Claude Code, Cursor, or Codex (< 10 lines)
 
 ```bash
-# Clone the repository
-git clone https://github.com/memrohq/memro.git
-cd memro
+# 1. Connect installed agent tools via device login:
+npx memro-cli connect
 
-# Copy environment template
-cp .env.example .env
-
-# Start all services
-docker compose up -d
-
-# Verify it's running
-curl http://localhost:8081/health
-# {"status":"ok","db":"ok","vector_store":"ok",...}
+# 2. Check connection status:
+npx memro-cli status
 ```
 
-**That's it!** memro.co is now running on your infrastructure.
+In your assistant, say: *"Remember that our primary database is PostgreSQL 16 with pgvector."*  
+Restart your session and ask: *"What database and extensions do we use?"*
 
-- **Backend API**: http://localhost:8081
-- **Developer dashboard**: http://localhost:5173
+### Option B: Self-Host with Docker Compose (Source Available)
 
----
+Run the full Memro API server and PostgreSQL with pgvector on your own infrastructure:
 
-## Repository layout
+#### Option 1: Clone the repository (works today)
+```bash
+git clone https://github.com/memrohq/memro && cd memro
+cp .env.example .env              # add OPENAI_API_KEY for hybrid search; set METRICS_TOKEN
+docker compose up -d              # API on :8081, dashboard on :5173, Postgres on 127.0.0.1:55432
+curl http://localhost:8081/health
+```
 
-| Path | Contents |
-|---|---|
-| [`server/`](server) | Memro API server (Go, Postgres + pgvector) |
-| [`sdk/js`](sdk/js), [`sdk/python`](sdk/python), [`sdk/go`](sdk/go) | Client SDKs |
-| [`mcp/`](mcp) | MCP server for Claude Desktop, Cursor, Zed and other MCP clients |
-| [`integrations/`](integrations) | VS Code and Acode extensions |
-| [`apps/dashboard/`](apps/dashboard) | Developer dashboard |
-| [`deploy/`](deploy), [`docs/deploy/`](docs/deploy) | Self-hosting configs and guides |
-| [`docs/`](docs/README.md) | Developer documentation: quickstart, API reference, SDKs, MCP |
-| [`docs/spec/`](docs/spec) | Protocol specification |
-| [`bench/`](bench) | Benchmarks |
+#### Option 2: Prebuilt images (no clone required, after v0.1.0 release)
+```bash
+curl -fsSL https://raw.githubusercontent.com/memrohq/memro/v0.1.0/docker-compose.release.yml -o docker-compose.yml && docker compose up -d
+curl http://localhost:8081/health
+```
+*(Note: The prebuilt image one-liner downloads `docker-compose.release.yml` with pinned `ghcr.io/memrohq/memro:0.1.0` and `ghcr.io/memrohq/memro-dashboard:0.1.0` images, available once `v0.1.0` is published.)*
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
+- **Backend API**: `http://localhost:8081`
+- **Dashboard**: `http://localhost:5173`
+- **Postgres Database**: Port `55432` on localhost (Option 1 clone) to avoid port 5432 collisions with existing local Postgres setups.
+- **Metrics Token**: Set `METRICS_TOKEN` (min 32 characters) in `.env` to protect `GET /metrics` and `GET /stats/cache`; the server logs a warning if unset.
+- **Verify Signatures**: Verify published container images keylessly using Cosign:
+  ```bash
+  cosign verify ghcr.io/memrohq/memro:0.1.0 \
+    --certificate-identity-regexp 'https://github.com/memrohq/memro/' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
+
+For complete deployment options, production topologies, and configuration tables, see [docs/self-hosting.md](docs/self-hosting.md).
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                  Your Agent                     │
-│          (Python, JS, or any language)          │
-└────────────────┬────────────────────────────────┘
-                 │
-                 │ HTTP API / SDK
-                 │
-┌────────────────▼────────────────────────────────┐
-│              memro.co Backend                   │
-│            (Go + net/http)                      │
-├─────────────────────────────────────────────────┤
-│  Identity Store  │  Memory Store  │  Vectors    │
-│   (Postgres)     │   (Postgres)   │ (pgvector)  │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────┐
+│         Clients & MCP Tools          │
+│   Claude Code · Cursor · Codex · SDKs│
+└──────────────────┬───────────────────┘
+                   │  HTTP REST / Stdio MCP
+┌──────────────────▼───────────────────┐
+│            Memro API (Go)            │
+│  Sovereign Ed25519 Identity · RRF    │
+└──────────────────┬───────────────────┘
+                   │  SQL & Embeddings
+┌──────────────────▼───────────────────┐
+│       PostgreSQL 16 + pgvector       │
+│  pgvector Dense Search + tsvector FTS│
+└──────────────────────────────────────┘
 ```
 
-### Components
-
-- **Backend**: Go API server (`server/cmd/memro-api`)
-- **Database**: PostgreSQL with pgvector (identities, memories, knowledge graph and embeddings in one database)
-- **Frontend**: React explorer (optional, for debugging)
+Memro runs a Go HTTP API backed by PostgreSQL and pgvector. Search queries combine vector cosine similarity and full-text keyword search using Reciprocal Rank Fusion (RRF, $k=60$). Agents authenticate using sovereign Ed25519 keypairs solved via local proof-of-work (private keys never leave the host) or standard Bearer API tokens.
 
 ---
 
-## API Usage
+## Repository Layout
 
-### 1. Create Agent Identity
+`memrohq/memro` holds all components in one mono-repository:
 
-```bash
-curl -X POST http://localhost:8081/identity
-```
-
-Response:
-```json
-{
-  "agent_id": "bc2df9d6d9...383c",
-  "private_key": "a1b2c3..."
-}
-```
-
-### 2. Store Memory
-
-```bash
-curl -X POST http://localhost:8081/memory \
-  -H "Content-Type: application/json" \
-  -d '{
-    "agent_id": "bc2df9d6...",
-    "content": "User prefers concise responses",
-    "memory_type": "profile",
-    "visibility": "private"
-  }'
-```
-
-### 3. Recall Memories
-
-```bash
-curl http://localhost:8081/memory/bc2df9d6...
-```
+| Path | Description | Documentation |
+|---|---|---|
+| [`server/`](server) | Go API server, PostgreSQL + pgvector engine | [Self-Hosting Guide](docs/self-hosting.md) |
+| [`cli/`](cli) | One-command connector (`npx memro-cli connect`) | [CLI Documentation](cli/README.md) |
+| [`mcp/`](mcp) | Model Context Protocol server (stdio & SSE HTTP) | [MCP Guide](docs/mcp.md) |
+| [`sdk/python/`](sdk/python) | Official Python SDK (PyPI: `memro`) | [Python SDK Guide](sdk/python/README.md) |
+| [`sdk/js/`](sdk/js) | Official JavaScript / TypeScript SDK (npm: `@memro/sdk`) | [JavaScript SDK Guide](sdk/js/README.md) |
+| [`sdk/go/`](sdk/go) | Official Go SDK (`github.com/memrohq/memro/sdk/go@v0.1.0`) | [Go SDK Guide](sdk/go/README.md) |
+| [`examples/`](examples) | Runnable integrations (Claude Code, Cursor, Codex) | [Examples Index](examples/README.md) |
+| [`bench/`](bench) | Reproducible benchmark harness and test suites | [Benchmarks Index](docs/benchmarks/README.md) |
+| [`docs/`](docs) | Architecture, concepts, API reference, decisions | [Documentation Index](docs/README.md) |
 
 ---
 
-## SDKs
+## Official SDKs & Runnable Examples
 
-### Python
+### Python (`sdk/python`)
+```bash
+# PyPI (once published) or install from source: pip install ./sdk/python
+pip install memro
+```
 ```python
 from memro import Agent
 
-agent = Agent.create()
-agent.remember("First memory")
-memories = agent.recall(limit=10)
+agent = Agent.create()  # local sovereign Ed25519 identity
+mem = agent.remember("The billing service was rewritten in Go", type="semantic")
+results = agent.recall("billing service language")
+print(results[0].content)
 ```
+See runnable script at [`examples/python/register_remember_recall.py`](examples/python/register_remember_recall.py).
 
-### JavaScript
-```javascript
-import { Agent } from 'memro';
-
-const agent = await Agent.create();
-await agent.remember("First memory");
-const memories = await agent.recall({ limit: 10 });
-```
-
----
-
-## Deployment
-
-### Local Development
+### JavaScript / TypeScript (`sdk/js`)
 ```bash
-docker-compose up -d
+# npm (once published) or install from local build: npm install ./sdk/js
+npm install @memro/sdk
 ```
+```typescript
+import { Agent } from '@memro/sdk';
 
-### Production (Cloud)
+const agent = await Agent.create(); // local sovereign Ed25519 identity
+const mem = await agent.remember('The billing service was rewritten in Go', { type: 'semantic' });
+const results = await agent.recall('billing service language');
+console.log(results[0].content);
+```
+See runnable script at [`examples/typescript/index.js`](examples/typescript/index.js).
 
-#### AWS (ECS + RDS + ElastiCache)
-See [docs/deploy/aws.md](docs/deploy/aws.md)
-
-#### GCP (Cloud Run + Cloud SQL)
-See [docs/deploy/gcp.md](docs/deploy/gcp.md)
-
-#### DigitalOcean (Droplet + Managed DB)
-See [docs/deploy/digitalocean.md](docs/deploy/digitalocean.md)
-
----
-
-## Configuration
-
-### Environment Variables
-
+### Go (`sdk/go`)
 ```bash
-# Database (Postgres + pgvector)
-DATABASE_URL=postgresql://memro:memro@db:5432/memro
-
-# API
-PORT=8081
-LOG_LEVEL=info
+go get github.com/memrohq/memro/sdk/go@v0.1.0
 ```
+```go
+package main
 
-See [.env.example](.env.example) for full configuration.
+import (
+	"context"
+	"fmt"
+	memro "github.com/memrohq/memro/sdk/go"
+)
 
----
-
-## Data Ownership
-
-### Export All Data
-```bash
-curl http://localhost:8081/export/{agent_id} > agent_data.json
+func main() {
+	ctx := context.Background()
+	agent, _ := memro.CreateAgent(nil)
+	mem, _ := agent.Remember(ctx, "The billing service was rewritten in Go", nil)
+	results, _ := agent.Recall(ctx, "billing service language", nil)
+	fmt.Println(results[0].Content)
+}
 ```
-
-### Delete Agent
-```bash
-curl -X DELETE http://localhost:8081/identity/{agent_id}
-```
-
-**Your data. Your infrastructure. No lock-in.**
+See runnable script at [`examples/go/main.go`](examples/go/main.go).
 
 ---
 
-## Performance
+## Integration Guides
 
-- **Persistence**: <5ms (p99)
-- **Recall**: <50ms (p99)
-- **Throughput**: 1000+ writes/sec (single instance)
-- **Storage**: Unlimited (depends on your disk)
-
----
-
-## Pricing Philosophy
-
-### Always Free
-- ✅ Identity creation
-- ✅ Memory writes (unlimited)
-- ✅ Memory recall
-- ✅ Full export
-- ✅ Self-hosting
-
-### Paid (Managed Cloud)
-- 💰 Operational excellence (backups, monitoring, SLA)
-- 💰 Higher performance (dedicated resources)
-- 💰 Compliance (encryption, audit logs)
-
-**We make money by operating infrastructure reliably, not by owning your agents.**
-
-See [PRICING.md](PRICING.md) for managed cloud options.
+Step-by-step guides for connecting coding tools with full session-restart memory verification:
+- [Claude Code Integration](docs/integrations/claude-code.md) ([`examples/claude-code/`](examples/claude-code/))
+- [Cursor Integration](docs/integrations/cursor.md) ([`examples/cursor/`](examples/cursor/))
+- [OpenAI Codex Integration](docs/integrations/codex.md) ([`examples/codex/`](examples/codex/))
 
 ---
 
-## Contributing
+## Advanced Memory Features
 
-We welcome contributions of all kinds! See [CONTRIBUTING.md](CONTRIBUTING.md) for full guidelines.
+Memro includes structured primitives and cognitive graphs beyond basic vector search:
+- **Typed Memories**: Categorize observations as `semantic` (facts), `episodic` (events/conversations), `procedural` (runbooks/recipes), or `profile` (agent guardrails). See [Memory Concepts](docs/concepts.md).
+- **Temporal Search & Evolution**: Query memories with timestamp weighting and trace how beliefs evolve over time. See [API Reference](docs/api-reference.md).
+- **Conflict Analysis & Resolution**: Identify contradictory facts across sessions and mark superseded memories using `resolve_conflict()`. See [Conflict Resolution](docs/concepts.md#conflict-resolution).
+- **Reasoning Graphs**: Trace memory provenance, causal chains, and dependencies between stored observations. See [Opinionated Guide](docs/Opinionated_Guide.md).
 
-### 🌟 Easiest Way to Contribute: Add a Connector
-Want to contribute in under 15 minutes without writing Go code? Add a declarative YAML manifest for a REST service you use that isn't in the catalog yet (e.g. Basecamp, Height, Dev.to, Hashnode) in `server/internal/connectors/dce/catalog/`.
+---
 
-👉 Read the [Connector Contribution Guide](docs/contributing/add-a-connector.md) to build your first connector!
+## Measurable Verification & Benchmarks
 
-### Development Setup
+Memro publishes empirical evaluations and methodology:
+- **LongMemEval Benchmark**: Evaluated across 500 questions testing multi-session recall and knowledge updates. See [LongMemEval Report](docs/benchmarks/longmemeval.md).
+- **Empirical Failure & Boundary Evaluations**: Runnable test suite for identity boundaries, contradictory facts, stale facts, and distractor rejection. See [Measurable Evaluations](docs/benchmarks/evaluations.md).
+- **Clean-Machine Verification**: Full transcript verifying every quickstart command in a container without local caches. See [Verification Transcript](docs/verify-quickstart.md).
+
+---
+
+## Contributing & Development
 
 ```bash
-# Backend (Go 1.26+): start Postgres, then run the API
+# 1. Start PostgreSQL with pgvector
 docker compose up -d db
+
+# 2. Run backend API server
 cd server
-DATABASE_URL=postgres://memro:memro@localhost:5432/memro go run ./cmd/memro-api
+DATABASE_URL=postgres://memro:memro@localhost:55432/memro go run ./cmd/memro-api
 
-# Tests (integration tests use the same database)
-MEMRO_TEST_DATABASE_URL=postgres://memro:memro@localhost:5432/memro go test -race ./...
-
-# Frontend (React)
-cd frontend
-npm install
-npm run dev
+# 3. Run tests
+MEMRO_TEST_DATABASE_URL=postgres://memro:memro@localhost:55432/memro go test -race ./...
 ```
 
----
-
-## License
-
-Memro is **source-available** under the
-[PolyForm Noncommercial License 1.0.0](LICENSE). You can read, run and
-modify it for free for personal projects, research, education and
-non-profit organizations.
-
-**Commercial use is not permitted under this license.** To use Memro in a
-commercial product or service, use [Memro Cloud](https://memro.co) or get a
-commercial license from us via [memro.co](https://memro.co).
+Please review [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) before submitting pull requests.
 
 ---
 
-## Support & Community
-
-- **Documentation**: [docs/](docs/README.md)
-- **Good First Issues**: [GitHub Issues](https://github.com/memrohq/memro/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
-- **Discord**: [discord.gg/memro](https://discord.gg/memro)
-- **Email**: support@memro.co
-
----
-
-## Roadmap
-
-- [x] Cryptographic identity (Ed25519)
-- [x] Long-term memory (Postgres)
-- [x] Semantic recall (pgvector)
-- [x] Official Python SDK (`sdk/python`)
-- [x] Official TypeScript/JavaScript SDK (`sdk/js`)
-- [x] Native MCP Server for Cursor, Claude Desktop & Zed (`mcp/`)
-- [x] Connectors: 7 native OAuth (Slack, GitHub, Linear, Sentry, Notion, Jira, GitLab) + 43 declarative
-- [ ] More community-contributed declarative connectors
-- [ ] LangChain & LangGraph Memory Provider
-- [ ] CrewAI & LlamaIndex Integrations
-- [ ] Request signing verification
-- [ ] Encrypted-at-rest memory
-- [ ] Audit logging
-- [ ] Multi-region replication
-
----
-
-**memro.co is infrastructure, not a product.**
-
-Just like you wouldn't build your own database, you shouldn't build agent memory from scratch.
-
-Self-host it. Trust it. Scale it.
+Repository: [github.com/memrohq/memro](https://github.com/memrohq/memro) · Documentation: [https://memro.co](https://memro.co)
+License: Source available under [PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0). Free for non-commercial use; commercial use requires Memro Cloud or a commercial license.

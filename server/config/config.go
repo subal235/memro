@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -60,6 +61,11 @@ type Config struct {
 	// replaced, e.g. how to pay for a plan.
 	UnclaimedCapHint string
 
+	// MetricsToken protects GET /metrics and GET /stats/cache with Bearer auth.
+	// When set, it must be at least 32 characters. When empty, metrics and
+	// cache stats are served without auth (for self-hosters) and a warning is logged.
+	MetricsToken string
+
 	// Public URLs handed to `memro connect`.
 	AppURL string // dashboard, e.g. https://app.memro.co
 	MCPURL string // hosted MCP endpoint, e.g. https://mcp.memro.co/mcp
@@ -83,7 +89,7 @@ func Load() Config {
 		RateLimitMax:          envInt("RATE_LIMIT_MAX", 200),
 		RateLimitWindow:       time.Duration(envInt("RATE_LIMIT_WINDOW_SECONDS", 60)) * time.Second,
 		TrustProxyHeaders:     envBool("TRUST_PROXY_HEADERS", false),
-		AllowLegacySignatures: envBool("ALLOW_LEGACY_SIGNATURES", true),
+		AllowLegacySignatures: envBool("ALLOW_LEGACY_SIGNATURES", false),
 		EmbeddingProvider:     strings.ToLower(env("EMBEDDING_PROVIDER", "openai")),
 		EmbeddingModel:        os.Getenv("EMBEDDING_MODEL"),
 		OpenAIAPIKey:          os.Getenv("OPENAI_API_KEY"),
@@ -102,6 +108,7 @@ func Load() Config {
 		UnclaimedMaxMemories:  envInt("UNCLAIMED_MAX_MEMORIES", 0),
 		UnclaimedMaxFileBytes: int64(envInt("UNCLAIMED_MAX_FILE_BYTES", 0)),
 		UnclaimedCapHint:      strings.TrimSpace(os.Getenv("UNCLAIMED_CAP_HINT")),
+		MetricsToken:          strings.TrimSpace(os.Getenv("METRICS_TOKEN")),
 		DevLogOTP:             envBool("DEV_LOG_OTP", false),
 		AppURL:                strings.TrimRight(env("APP_URL", "http://localhost:5173"), "/"),
 		MCPURL:                env("MCP_URL", "http://localhost:8080/mcp"),
@@ -160,6 +167,14 @@ func Load() Config {
 		}
 	}
 	return c
+}
+
+// Validate checks for configuration errors that must prevent the server from starting.
+func (c Config) Validate() error {
+	if c.MetricsToken != "" && len(c.MetricsToken) < 32 {
+		return errors.New("METRICS_TOKEN must be at least 32 characters")
+	}
+	return nil
 }
 
 // ConnectorsConfig configures the Slack and GitHub connectors.
