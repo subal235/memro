@@ -41,7 +41,11 @@ def source_turns(session):
         role = str(message.get("role", "unknown"))
         content = str(message.get("content", ""))
         if content.strip():
-            yield i, role, f"{role.capitalize()}: {content}"
+            rendered = f"{role.capitalize()}: {content}"
+            # Keep each memory under the server's 10k-character limit while
+            # retaining the same stable source-turn reference for every chunk.
+            for start in range(0, len(rendered), base_run.MAX_MEMORY_CHARS):
+                yield i, role, rendered[start:start + base_run.MAX_MEMORY_CHARS]
 
 
 def ingest_question(q, client, agent, atomic=False):
@@ -130,9 +134,9 @@ def graph_rerank_only(hits, agent_id):
         weight = GRAPH_WEIGHT.get(relation, 0.2)
         edge_count += 1
         if source in seed_ids and target not in seed_ids:
-            bonus[target] += 0.25 * base[source] * confidence * weight
+            bonus[target] += 0.03 * base[source] * confidence * weight
         elif relation == "associated" and target in seed_ids and source not in seed_ids:
-            bonus[source] += 0.25 * base[target] * confidence * weight
+            bonus[source] += 0.03 * base[target] * confidence * weight
 
     reranked = sorted(hits, key=lambda h: (base[h["memory_id"]] + bonus[h["memory_id"]],
                                             -rank[h["memory_id"]]), reverse=True)
