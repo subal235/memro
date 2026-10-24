@@ -72,6 +72,8 @@ def ingest_question(q, client, agent, atomic=False):
                     "source_session_id": sid,
                     "source_turn_index": turn_index,
                     "source_role": role,
+                    "source_session_date": date,
+                    "event_date_basis": "session_date_proxy",
                     "question_id": q["question_id"],
                 },
             )
@@ -169,6 +171,7 @@ def retrieve_arm(q, client, agent, arm):
         "search_ms": round(search_ms, 2),
         "graph_rerank": rerank_diag,
         "memories_written": len(meta),
+        "memories": len(meta),
         "atomic_ingestion": atomic,
         "temporal_weight": 0.30 if arm == "temporal" else 0.0,
     }
@@ -250,6 +253,8 @@ def main():
             created_at=dt.datetime.now(dt.timezone.utc).isoformat(),
             questions_total=len(data), answer_model=base_run.ANSWER_MODEL,
             top_k=base_run.TOP_K, mode="hybrid", no_llm=args.no_llm,
+            temporal_weight=0.30 if arm == "temporal" else 0.0,
+            ingestion_strategy="source_turns" if arm == "atomic-source" else "exchange",
         )
         hyp_file = out_dir / "hyp.jsonl"
         done = set()
