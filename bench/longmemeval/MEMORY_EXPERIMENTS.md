@@ -44,7 +44,7 @@ answer model, judge model, prompt, server commit, and dataset snapshot.
 - The graph reranker uses a conservative deterministic relation bonus on the
   current top-K candidate pool; it cannot recover a relevant memory absent from
   that pool. The base rank remains dominant and no new memories are inserted.
-- Temporal ranking is a separate arm; it does not also enable graph reranking.
+- Temporal ranking is a separate arm; it does not also enable graph reranking. The LongMemEval-S source provides session dates, not reliable event timestamps for every claim. This arm tests recency weighting only; explicit event-date extraction and historical-value handling require a follow-up experiment.
 - The atomic arm increases memory count and embedding work, so compare cost,
   ingest time, evidence coverage, answer accuracy, and latency together.
 - This runner does not claim a score improvement. Keep changes experimental until
